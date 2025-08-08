@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Tetris – Fullscreen</title>
+<style>
+  :root { --bg:#0b0d12; --fg:#e8eef6; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); }
+  body { height: 100svh; }
+  #canvasWrap { position:fixed; inset:0; touch-action:none; }
+  canvas { display:block; width:100%; height:100%; }
+</style>
+</head>
+<body>
+<div id="canvasWrap">
+  <canvas id="game" aria-label="Tetris board"></canvas>
+</div>
+
+<script>
+/* Tetris with in-canvas controls (lower third left/right), tap to rotate,
+   long-press (>=700ms) to soft drop. Designed for iPhone fullscreen.
+*/
+(function(){
+  const W=10, H=20, EMPTY=0;
+  const COLORS={I:'#36d1ff',J:'#4a67ff',L:'#ff9f3c',O:'#ffe04d',S:'#59e27e',T:'#bc59ff',Z:'#ff5b6e',X:'#18213a'};
+  const SHAPES={
+    I:[[0,1],[1,1],[2,1],[3,1]],
+    J:[[0,0],[0,1],[1,1],[2,1]],
+    L:[[2,0],[0,1],[1,1],[2,1]],
+    O:[[1,0],[2,0],[1,1],[2,1]],
+    S:[[1,0],[2,0],[0,1],[1,1]],
+    T:[[1,0],[0,1],[1,1],[2,1]],
+    Z:[[0,0],[1,0],[1,1],[2,1]]
+  };
+  const TYPES = Object.keys(SHAPES);
+
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  let cw=0,ch=0, cell=0, boardW=0, boardH=0, offX=0, offY=0;
+  function resize(){
+    const dpr = window.devicePixelRatio || 1;
+    cw = Math.floor(cvs.clientWidth * dpr);
+    ch = Math.floor(cvs.clientHeight * dpr);
+    cvs.width=cw; cvs.height=ch;
+    // Fit board by height; leave top HUD 10% height
+    const hudH = Math.floor(ch*0.1);
+    const usableH = ch - hudH;
+    cell = Math.floor(Math.min(usableH/H, cw/W));
+    boardW = cell*W;
+    boardH = cell*H;
+    offX = Math.floor((cw - boardW)/2);
+    offY = hudH + Math.floor((usableH - boardH)/2);
+    ctx.setTransform(1,0,0,1,0,0);
+    draw();
+  }
+  window.addEventListener('resize', resize, {passive:true});
+
+  // Game state
+  let grid=createGrid(W,H), current=null, bag=[], score=0, lines=0, level=1;
+  let dropBase=900, dropInt=dropBase, lastDrop=0, running=false, paused=false, softDrop=false;
+
+  function createGrid(w,h){return Array.from({length:h},()=>Array(w).fill(EMPTY));}
+
+  function spawn(){
+    if(bag.length===0) bag = shuffle(TYPES.slice());
+    const t = bag.pop();
+    const cells = SHAPES[t].map(([x,y])=>({x,y}));
+    return {type:t, color:COLORS[t], x:3, y:-2, rot:0, cells};
+  }
+  function clone(p){ return {type:p.type,color:p.color,x:p.x,y:p.y,rot:p.rot,cells:p.cells.map(c=>({x:c.x,y:c.y}))}; }
+  function absCells(p){ return p.cells.map(({x,y})=>({x:x+p.x, y:y+p.y})); }
+  function valid(p){
+    for(const c of absCells(p)){
+      if(c.x<0||c.x>=W||c.y>=H) return false;
+      if(c.y>=0 && grid[c.y][c.x]!==EMPTY) return false;
+    }
+    return true;
+  }
+  function rotate(){
+    const p=clone(current);
+    p.rot=(p.rot+1)%4;
+    p.cells=p.cells.map(({x,y})=>({x:y, y:-x}));
+    for(const dx of [0,-1,1,-2,2]){
+      const t=clone(p); t.x+=dx;
+      if(valid(t)){ current=t; return; }
+    }
+  }
+  function move(d){
+    const p=clone(current); p.x+=d; if(valid(p)) current=p;
+  }
+  function drop(){
+    const p=clone(current); p.y+=1;
+    if(valid(p)){ current=p; return true; }
+    return false;
+  }
+  function hardDrop(){
+    while(drop()){} lock(); clearLines(); current=spawn(); if(!valid(current)) gameOver();
+  }
+  function lock(){
+    for(const c of absCells(current)){
+      if(c.y<0) continue;
+      grid[c.y][c.x]=current.type;
+    }
+  }
+  function clearLines(){
+    let n=0;
+    for(let y=H-1;y>=0;y--){
+      if(grid[y].every(v=>v!==EMPTY)){
+        grid.splice(y,1); grid.unshift(Array(W).fill(EMPTY));
+        n++; y++;
+      }
+    }
+    if(n){
+      const linePts=[0,40,100,300,1200];
+      score += linePts[n]*level;
+      lines += n;
+      const newLvl = 1+Math.floor(lines/10);
+      if(newLvl!==level){
+        level=newLvl;
+        dropInt = Math.max(120, dropBase*Math.pow(0.88, level-1));
+      }
+    }
+  }
+  function start(){
+    grid=createGrid(W,H); current=spawn(); bag=[];
+    score=0; lines=0; level=1; dropInt=dropBase; lastDrop=performance.now();
+    running=true; paused=false; softDrop=false;
+    loop(lastDrop);
+  }
+  function pause(){ if(!running) return; paused=!paused; if(!paused){ lastDrop=performance.now(); requestAnimationFrame(loop);} }
+  function gameOver(){ running=false; softDrop=false; draw(true); setTimeout(()=>alert('Game Over\\nScore: '+score), 10); }
+
+  // Main loop
+  function loop(ts){
+    if(!running||paused) return;
+    const sp = softDrop ? dropInt/18 : dropInt;
+    if(ts-lastDrop>sp){
+      if(!drop()){ lock(); clearLines(); current=spawn(); if(!valid(current)){ gameOver(); return; } }
+      lastDrop=ts;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // Drawing
+  function draw(showOver){
+    ctx.clearRect(0,0,cw,ch);
+
+    // HUD background
+    const hudH = Math.floor(ch*0.1);
+    ctx.fillStyle = '#0e1322';
+    ctx.fillRect(0,0,cw,hudH);
+    ctx.fillStyle = '#aecdff';
+    ctx.font = Math.floor(hudH*0.5)+'px system-ui,-apple-system,sans-serif';
+    ctx.textBaseline='middle';
+    ctx.textAlign='left';
+    ctx.fillText('Score: '+score, 14, Math.floor(hudH/2));
+    ctx.textAlign='center';
+    ctx.fillText('Lines: '+lines, cw/2, Math.floor(hudH/2));
+    ctx.textAlign='right';
+    ctx.fillText('Lvl: '+level, cw-14, Math.floor(hudH/2));
+
+    // Board background
+    ctx.fillStyle='#0b1222';
+    roundRect(ctx, offX-6, offY-6, boardW+12, boardH+12, 12);
+    ctx.fill();
+
+    // Grid cells
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const t=grid[y][x];
+        drawCell(x,y, t ? COLORS[t] : '#0f1830', !!t);
+      }
+    }
+
+    // Current piece + ghost
+    if(current){
+      let ghost=clone(current);
+      while(valid({...ghost,y:ghost.y+1})) ghost.y++;
+      for(const c of absCells(ghost)){
+        if(c.y>=0) drawCell(c.x,c.y, current.color+'33', false, true);
+      }
+      for(const c of absCells(current)){
+        if(c.y>=0) drawCell(c.x,c.y, current.color, false);
+      }
+    }
+
+    // Overlay controls (lower third)
+    const lowerTop = Math.floor(ch*(2/3));
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, lowerTop, cw/2, ch-lowerTop);   // left zone
+    ctx.fillRect(cw/2, lowerTop, cw/2, ch-lowerTop); // right zone
+    ctx.globalAlpha = 1;
+
+    // Arrow glyphs
+    ctx.fillStyle = '#ffffffaa';
+    const arrowSize = Math.min(80, Math.floor((ch-lowerTop)*0.5));
+    drawArrow(cw*0.25, lowerTop + (ch-lowerTop)/2, arrowSize, 'left');
+    drawArrow(cw*0.75, lowerTop + (ch-lowerTop)/2, arrowSize, 'right');
+
+    // Game over veil
+    if(showOver){
+      ctx.fillStyle='rgba(0,0,0,.55)';
+      ctx.fillRect(0,0,cw,ch);
+      ctx.fillStyle='#fff';
+      ctx.textAlign='center';
+      ctx.font='bold 28px system-ui,-apple-system,sans-serif';
+      ctx.fillText('Game Over', cw/2, ch/2 - 8);
+      ctx.font='16px system-ui,-apple-system,sans-serif';
+      ctx.fillText('Tap with two fingers to restart', cw/2, ch/2 + 18);
+    }
+
+    function drawCell(x,y,color, solid, ghost){
+      const px = offX + x*cell, py = offY + y*cell;
+      ctx.fillStyle = color || COLORS.X;
+      ctx.fillRect(px,py,cell,cell);
+      if(solid){
+        ctx.fillStyle='rgba(255,255,255,.08)'; ctx.fillRect(px,py,cell, cell*0.25);
+        ctx.fillStyle='rgba(0,0,0,.15)'; ctx.fillRect(px,py+cell*0.75,cell,cell*0.25);
+      } else {
+        ctx.strokeStyle='rgba(255,255,255,.04)'; ctx.strokeRect(px+.5,py+.5,cell-1,cell-1);
+      }
+      if(ghost){
+        ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.strokeRect(px+1.5,py+1.5,cell-3,cell-3);
+      }
+    }
+  }
+
+  function roundRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function drawArrow(cx,cy,size,dir){
+    const w=size, h=size*0.8;
+    ctx.beginPath();
+    if(dir==='left'){
+      ctx.moveTo(cx+w*0.4, cy-h*0.5);
+      ctx.lineTo(cx-w*0.4, cy);
+      ctx.lineTo(cx+w*0.4, cy+h*0.5);
+    } else {
+      ctx.moveTo(cx-w*0.4, cy-h*0.5);
+      ctx.lineTo(cx+w*0.4, cy);
+      ctx.lineTo(cx-w*0.4, cy+h*0.5);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Touch controls
+  let holdTimer=null, repeatTimer=null, didLong=false, tapStartTime=0, activeZone=null;
+  const LONG_MS=700;
+  function inBoard(px,py){ return px>=offX && px<offX+boardW && py>=offY && py<offY+boardH; }
+  function lowerZone(px,py){ return py >= ch*(2/3); }
+
+  function onTouchStart(e){
+    if(!running){ start(); return; }
+    if(paused) return;
+    const t = e.changedTouches ? e.changedTouches[0] : e;
+    const px = (t.clientX) * (window.devicePixelRatio||1);
+    const py = (t.clientY) * (window.devicePixelRatio||1);
+    didLong=false;
+    // If in lower third, treat as left/right button; no rotate
+    if(lowerZone(py,py)){ /* typo guard */ }
+    if(py >= ch*(2/3)){
+      activeZone = (t.clientX < window.innerWidth/2) ? 'left' : 'right';
+      if(activeZone==='left') move(-1); else move(1);
+      clearTimeout(holdTimer); clearInterval(repeatTimer);
+      holdTimer = setTimeout(()=>{
+        repeatTimer = setInterval(()=>{ if(activeZone==='left') move(-1); else move(1); draw(); }, 70);
+      }, 200);
+      e.preventDefault();
+      draw();
+      return;
+    }
+
+    // Elsewhere on board -> tap/long press
+    if(inBoard(px,py)){
+      tapStartTime=Date.now();
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(()=>{ didLong=true; softDrop=true; }, LONG_MS);
+      e.preventDefault();
+    }
+  }
+
+  function onTouchEnd(e){
+    clearTimeout(holdTimer); clearInterval(repeatTimer); repeatTimer=null; holdTimer=null;
+    if(!running){ return; }
+    if(paused) return;
+    if(activeZone){ activeZone=null; return; }
+
+    if(!didLong){
+      rotate();
+    }
+    softDrop=false;
+  }
+
+  // Two-finger tap to pause/restart
+  function onTouchStartDoc(e){
+    if(e.touches && e.touches.length===2){
+      if(running){ pause(); }
+      else { start(); }
+    }
+  }
+
+  const wrap = document.getElementById('canvasWrap');
+  wrap.addEventListener('touchstart', onTouchStart, {passive:false});
+  wrap.addEventListener('touchend', onTouchEnd, {passive:false});
+  document.addEventListener('touchstart', onTouchStartDoc, {passive:false});
+
+  // Keyboard for desktop testing
+  window.addEventListener('keydown', (e)=>{
+    if(!running) start();
+    if(paused) return;
+    if(e.key==='ArrowLeft') move(-1);
+    else if(e.key==='ArrowRight') move(1);
+    else if(e.key==='ArrowUp' || e.key===' ') rotate();
+    else if(e.key==='ArrowDown') softDrop=true;
+    else if(e.key==='p') pause();
+  });
+  window.addEventListener('keyup', (e)=>{ if(e.key==='ArrowDown') softDrop=false; });
+
+  // Start on first interaction; render idle screen
+  resize(); draw();
+
+  // Idle overlay text
+  (function intro(){
+    ctx.fillStyle='rgba(255,255,255,.08)';
+    ctx.textAlign='center';
+    ctx.font='bold 24px system-ui,-apple-system,sans-serif';
+    ctx.fillText('Tap to Play', cvs.width/2, cvs.height*0.52);
+    ctx.font='14px system-ui,-apple-system,sans-serif';
+    ctx.fillText('Tap=Rotate · Hold=Soft Drop · Bottom Left/Right=Move', cvs.width/2, cvs.height*0.57);
+    ctx.fillText('Two-finger tap: Pause/Restart', cvs.width/2, cvs.height*0.62);
+  })();
+
+  function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+})();</script>
+</body>
+</html>
